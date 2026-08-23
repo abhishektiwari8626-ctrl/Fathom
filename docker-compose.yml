@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: fathom-postgres
+    environment:
+      POSTGRES_USER: fathom
+      POSTGRES_PASSWORD: fathom
+      POSTGRES_DB: fathom
+    ports:
+      - "5432:5432"
+    volumes:
+      - fathom_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fathom -d fathom"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  fathom_pgdata:
