@@ -12,7 +12,8 @@ from sqlalchemy import text
 
 from app.config import get_settings
 from app.database import Base, engine
-from app.routers.ingest import eval_router, router as ingest_router
+from app.routers.evaluations import router as eval_router
+from app.routers.ingest import router as ingest_router
 
 settings = get_settings()
 
