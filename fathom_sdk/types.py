@@ -25,7 +25,11 @@ class SpanData:
     latency_ms: float = 0.0
     token_count: int = 0
     model_name: str | None = None
-    metadata: dict = field(default_factory=dict)
+    started_at: datetime | None = None
+    ended_at: datetime | None = None
+    side_effects: str = "unknown"
+    llm_request: dict | None = None
+    cost_usd: float | None = None
     created_at: datetime | None = None
 
     def to_dict(self) -> dict:
@@ -44,4 +48,10 @@ class SpanData:
             "token_count": self.token_count,
             "model_name": self.model_name,
             "metadata": self.metadata,
+            "started_at": self.started_at.isoformat() if self.started_at else None,
+            "ended_at": self.ended_at.isoformat() if self.ended_at else None,
+            "side_effects": self.side_effects,
+            "llm_request": self.llm_request,
+            "cost_usd": self.cost_usd,
         }
+

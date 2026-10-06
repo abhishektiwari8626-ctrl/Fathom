@@ -94,6 +94,8 @@ def fathom_trace(
     name: str | None = None,
     model: str | None = None,
     metadata: dict | None = None,
+    side_effects: str | None = None,
+    llm_request: dict | None = None,
 ):
     """Decorator that traces a function execution as a Fathom span.
 
@@ -103,10 +105,23 @@ def fathom_trace(
         name: Override for the span name. Defaults to the function name.
         model: Model name for LLM calls (e.g., "gpt-4o").
         metadata: Extra metadata to attach to the span.
+        side_effects: Side effects category: "none", "read", "write", "unknown".
+        llm_request: Full LLM request params for replay (Section 13.2 R1, 16.1).
 
     Returns:
         A decorator that wraps the target function.
     """
+    from datetime import datetime, timezone
+
+    # Infer default side_effects if not specified
+    eff = side_effects
+    if eff is None:
+        if kind == "retrieval":
+            eff = "read"
+        elif kind == "processing":
+            eff = "none"
+        else:
+            eff = "unknown"
 
     def decorator(func):
         span_name = name or func.__name__
@@ -119,15 +134,23 @@ def fathom_trace(
                 parent_id = current_span_id.get()
                 run_id = current_run_id.get()
 
-                # Set this span as the current span for child calls
                 token = current_span_id.set(span_id)
-
                 input_data = _capture_inputs(func, args, kwargs)
+                started_at = datetime.now(timezone.utc)
                 start_time = time.perf_counter()
+
+                # Capture request for LLM replay
+                request_payload = llm_request
+                if kind == "llm_call" and request_payload is None:
+                    request_payload = {
+                        "model": model or "gpt-4o-mini",
+                        "input": input_data,
+                    }
 
                 try:
                     result = await func(*args, **kwargs)
                     elapsed_ms = (time.perf_counter() - start_time) * 1000
+                    ended_at = datetime.now(timezone.utc)
 
                     span = SpanData(
                         id=span_id,
@@ -141,14 +164,19 @@ def fathom_trace(
                         latency_ms=round(elapsed_ms, 2),
                         model_name=model,
                         metadata=metadata or {},
+                        started_at=started_at,
+                        ended_at=ended_at,
+                        side_effects=eff,
+                        llm_request=request_payload,
                     )
                     client.buffer_span(span)
                     logger.debug("Traced (async) %s [%.1fms]", span_name, elapsed_ms)
-
                     return result
 
-                except Exception as e:
+                except BaseException as e:
                     elapsed_ms = (time.perf_counter() - start_time) * 1000
+                    ended_at = datetime.now(timezone.utc)
+                    status_val = "cancelled" if isinstance(e, (asyncio.CancelledError, KeyboardInterrupt)) else "failed"
 
                     span = SpanData(
                         id=span_id,
@@ -156,21 +184,22 @@ def fathom_trace(
                         parent_span_id=parent_id,
                         name=span_name,
                         kind=kind,
-                        status="failed",
+                        status=status_val,
                         input_data=input_data,
                         error_message=traceback.format_exc(),
                         latency_ms=round(elapsed_ms, 2),
                         model_name=model,
                         metadata=metadata or {},
+                        started_at=started_at,
+                        ended_at=ended_at,
+                        side_effects=eff,
+                        llm_request=request_payload,
                     )
                     client.buffer_span(span)
-                    logger.debug("Traced (async, FAILED) %s [%.1fms]", span_name, elapsed_ms)
-
-                    raise  # Re-raise — decorator must be transparent
+                    logger.debug("Traced (async, %s) %s [%.1fms]", status_val, span_name, elapsed_ms)
+                    raise  # Transparently re-raise
 
                 finally:
-                    # CRITICAL: Reset contextvar to parent's value.
-                    # Without this, sibling calls would incorrectly become children.
                     current_span_id.reset(token)
 
             return async_wrapper
@@ -183,15 +212,22 @@ def fathom_trace(
                 parent_id = current_span_id.get()
                 run_id = current_run_id.get()
 
-                # Set this span as the current span for child calls
                 token = current_span_id.set(span_id)
-
                 input_data = _capture_inputs(func, args, kwargs)
+                started_at = datetime.now(timezone.utc)
                 start_time = time.perf_counter()
+
+                request_payload = llm_request
+                if kind == "llm_call" and request_payload is None:
+                    request_payload = {
+                        "model": model or "gpt-4o-mini",
+                        "input": input_data,
+                    }
 
                 try:
                     result = func(*args, **kwargs)
                     elapsed_ms = (time.perf_counter() - start_time) * 1000
+                    ended_at = datetime.now(timezone.utc)
 
                     span = SpanData(
                         id=span_id,
@@ -205,14 +241,19 @@ def fathom_trace(
                         latency_ms=round(elapsed_ms, 2),
                         model_name=model,
                         metadata=metadata or {},
+                        started_at=started_at,
+                        ended_at=ended_at,
+                        side_effects=eff,
+                        llm_request=request_payload,
                     )
                     client.buffer_span(span)
                     logger.debug("Traced (sync) %s [%.1fms]", span_name, elapsed_ms)
-
                     return result
 
-                except Exception as e:
+                except BaseException as e:
                     elapsed_ms = (time.perf_counter() - start_time) * 1000
+                    ended_at = datetime.now(timezone.utc)
+                    status_val = "cancelled" if isinstance(e, KeyboardInterrupt) else "failed"
 
                     span = SpanData(
                         id=span_id,
@@ -220,22 +261,25 @@ def fathom_trace(
                         parent_span_id=parent_id,
                         name=span_name,
                         kind=kind,
-                        status="failed",
+                        status=status_val,
                         input_data=input_data,
                         error_message=traceback.format_exc(),
                         latency_ms=round(elapsed_ms, 2),
                         model_name=model,
                         metadata=metadata or {},
+                        started_at=started_at,
+                        ended_at=ended_at,
+                        side_effects=eff,
+                        llm_request=request_payload,
                     )
                     client.buffer_span(span)
-                    logger.debug("Traced (sync, FAILED) %s [%.1fms]", span_name, elapsed_ms)
-
-                    raise  # Re-raise — decorator must be transparent
+                    logger.debug("Traced (sync, %s) %s [%.1fms]", status_val, span_name, elapsed_ms)
+                    raise  # Transparently re-raise
 
                 finally:
-                    # CRITICAL: Reset contextvar to parent's value.
                     current_span_id.reset(token)
 
             return sync_wrapper
 
     return decorator
+

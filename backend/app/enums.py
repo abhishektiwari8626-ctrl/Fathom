@@ -14,6 +14,9 @@ class SpanStatus(str, Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     REWOUND = "rewound"
+    PENDING = "pending"
+    SKIPPED = "skipped"
+    CANCELLED = "cancelled"
 
 
 class SpanKind(str, Enum):
@@ -40,6 +43,7 @@ class EvaluationVerdict(str, Enum):
     PASS = "pass"
     WARNING = "warning"
     FAILURE = "failure"
+    ERROR = "error"
 
 
 class RunStatus(str, Enum):
@@ -49,3 +53,4 @@ class RunStatus(str, Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     REWOUND = "rewound"
+

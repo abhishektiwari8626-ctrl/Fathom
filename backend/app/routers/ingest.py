@@ -33,6 +33,10 @@ router = APIRouter(prefix="/api/v1/traces", tags=["Telemetry Ingestion"])
 # ──────────────────────────────────────────
 
 
+from app.utils.verdict import compute_effective_verdict
+from sqlalchemy import case
+
+
 def _run_to_response(run: TraceRun, span_count: int = 0) -> RunResponse:
     """Convert a TraceRun ORM instance to a RunResponse."""
     return RunResponse(
@@ -42,6 +46,8 @@ def _run_to_response(run: TraceRun, span_count: int = 0) -> RunResponse:
         total_tokens=run.total_tokens,
         total_latency_ms=run.total_latency_ms,
         metadata=run.metadata_ or {},
+        has_rewinds=run.has_rewinds,
+        active_group_id=run.active_group_id,
         created_at=run.created_at,
         updated_at=run.updated_at,
         span_count=span_count,
@@ -58,12 +64,19 @@ def _eval_to_response(evaluation: Evaluation) -> EvaluationResponse:
         score=evaluation.score,
         details=evaluation.details or {},
         summary=evaluation.summary,
+        evaluator_version=evaluation.evaluator_version,
+        evaluator_model=evaluation.evaluator_model,
+        prompt_hash=evaluation.prompt_hash,
+        error_message=evaluation.error_message,
         created_at=evaluation.created_at,
     )
 
 
 def _span_to_response(span: TraceSpan) -> SpanResponse:
     """Convert a TraceSpan ORM instance to a SpanResponse."""
+    eval_responses = [_eval_to_response(e) for e in span.evaluations] if span.evaluations else []
+    eff_verdict = compute_effective_verdict(eval_responses) if eval_responses else None
+
     return SpanResponse(
         id=span.id,
         run_id=span.run_id,
@@ -78,9 +91,17 @@ def _span_to_response(span: TraceSpan) -> SpanResponse:
         token_count=span.token_count,
         model_name=span.model_name,
         metadata=span.metadata_ or {},
+        started_at=span.started_at,
+        ended_at=span.ended_at,
+        rewind_group_id=span.rewind_group_id,
+        rewind_depth=span.rewind_depth or 0,
+        origin_span_id=span.origin_span_id,
+        side_effects=span.side_effects or "unknown",
+        cost_usd=float(span.cost_usd) if span.cost_usd is not None else None,
         created_at=span.created_at,
         updated_at=span.updated_at,
-        evaluations=[_eval_to_response(e) for e in span.evaluations] if span.evaluations else [],
+        evaluations=eval_responses,
+        effective_verdict=eff_verdict,
     )
 
 
@@ -123,27 +144,26 @@ async def create_run(
 async def _upsert_span(span_data: SpanCreate, db: AsyncSession) -> TraceSpan:
     """Upsert a single span. Idempotent on span ID.
 
-    If a span with the same ID exists, update it.
-    Otherwise, insert a new row.
+    Handles edge cases from Section 14:
+    - S-01: Child span arrives before parent (no blocking FK/check)
+    - S-02: Auto-creates placeholder run if run does not exist yet
+    - S-03: Forward-only status updates (running cannot overwrite completed/failed)
     """
-    # Verify the run exists
+    # S-02: Auto-create placeholder run if not already present
     run = await db.get(TraceRun, span_data.run_id)
     if not run:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Run {span_data.run_id} not found",
+        run = TraceRun(
+            id=span_data.run_id,
+            name=f"Run {str(span_data.run_id)[:8]}",
+            status="running",
         )
+        db.add(run)
+        await db.flush()
 
-    # Verify parent span exists (if provided)
-    if span_data.parent_span_id:
-        parent = await db.get(TraceSpan, span_data.parent_span_id)
-        if not parent:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Parent span {span_data.parent_span_id} not found",
-            )
+    # S-03: Upsert using PostgreSQL INSERT ... ON CONFLICT DO UPDATE
+    # Protect terminal statuses from being overwritten by delayed 'running' updates
+    terminal_statuses = ("completed", "failed", "cancelled", "rewound", "skipped")
 
-    # Upsert using PostgreSQL INSERT ... ON CONFLICT DO UPDATE
     stmt = pg_insert(TraceSpan).values(
         id=span_data.id,
         run_id=span_data.run_id,
@@ -158,17 +178,36 @@ async def _upsert_span(span_data: SpanCreate, db: AsyncSession) -> TraceSpan:
         token_count=span_data.token_count,
         model_name=span_data.model_name,
         metadata_=span_data.metadata,
+        started_at=span_data.started_at,
+        ended_at=span_data.ended_at,
+        side_effects=span_data.side_effects,
+        llm_request=span_data.llm_request,
+        cost_usd=span_data.cost_usd,
+    )
+
+    # Status update condition: if existing status is in terminal_statuses and incoming is 'running', keep existing
+    new_status_expr = case(
+        (
+            (TraceSpan.status.in_(terminal_statuses)) & (stmt.excluded.status == "running"),
+            TraceSpan.status,
+        ),
+        else_=stmt.excluded.status,
     )
 
     stmt = stmt.on_conflict_do_update(
         index_elements=["id"],
         set_={
-            "status": stmt.excluded.status,
+            "status": new_status_expr,
             "output_data": stmt.excluded.output_data,
             "error_message": stmt.excluded.error_message,
             "latency_ms": stmt.excluded.latency_ms,
             "token_count": stmt.excluded.token_count,
-            "metadata_": stmt.excluded.metadata_,
+            "metadata": stmt.excluded.metadata,
+            "started_at": stmt.excluded.started_at,
+            "ended_at": stmt.excluded.ended_at,
+            "side_effects": stmt.excluded.side_effects,
+            "llm_request": stmt.excluded.llm_request,
+            "cost_usd": stmt.excluded.cost_usd,
         },
     )
 
@@ -272,6 +311,10 @@ async def create_evaluation(
         score=payload.score,
         details=payload.details,
         summary=payload.summary,
+        evaluator_version=payload.evaluator_version,
+        evaluator_model=payload.evaluator_model,
+        prompt_hash=payload.prompt_hash,
+        error_message=payload.error_message,
     )
 
     stmt = stmt.on_conflict_do_update(
@@ -281,6 +324,10 @@ async def create_evaluation(
             "score": stmt.excluded.score,
             "details": stmt.excluded.details,
             "summary": stmt.excluded.summary,
+            "evaluator_version": stmt.excluded.evaluator_version,
+            "evaluator_model": stmt.excluded.evaluator_model,
+            "prompt_hash": stmt.excluded.prompt_hash,
+            "error_message": stmt.excluded.error_message,
         },
     )
 

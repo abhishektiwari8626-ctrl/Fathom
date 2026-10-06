@@ -47,10 +47,15 @@ class SpanCreate(BaseModel):
     input_data: dict = Field(default_factory=dict)
     output_data: dict = Field(default_factory=dict)
     error_message: str | None = None
-    latency_ms: float = Field(..., ge=0)
+    latency_ms: float = Field(default=0.0, ge=0)
     token_count: int = Field(default=0, ge=0)
     model_name: str | None = Field(default=None, max_length=100)
     metadata: dict = Field(default_factory=dict)
+    started_at: datetime | None = None
+    ended_at: datetime | None = None
+    side_effects: str = Field(default="unknown", max_length=10)
+    llm_request: dict | None = None
+    cost_usd: float | None = None
 
 
 class SpanBatchCreate(BaseModel):
@@ -71,6 +76,10 @@ class EvaluationCreate(BaseModel):
     score: float | None = Field(default=None, ge=0.0, le=1.0)
     details: dict = Field(default_factory=dict)
     summary: str | None = None
+    evaluator_version: str | None = None
+    evaluator_model: str | None = None
+    prompt_hash: str | None = None
+    error_message: str | None = None
 
 
 class RewindRequest(BaseModel):
@@ -99,6 +108,10 @@ class EvaluationResponse(BaseModel):
     score: float | None
     details: dict
     summary: str | None
+    evaluator_version: str | None = None
+    evaluator_model: str | None = None
+    prompt_hash: str | None = None
+    error_message: str | None = None
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -120,9 +133,21 @@ class SpanResponse(BaseModel):
     token_count: int
     model_name: str | None
     metadata: dict
+    started_at: datetime | None = None
+    ended_at: datetime | None = None
+    rewind_group_id: UUID | None = None
+    rewind_depth: int = 0
+    origin_span_id: UUID | None = None
+    side_effects: str = "unknown"
+    cost_usd: float | None = None
     created_at: datetime
     updated_at: datetime
     evaluations: list[EvaluationResponse] = []
+
+    # Computed fields for graph UI & analysis (15.4, F-01)
+    effective_verdict: EvaluationVerdict | None = None
+    is_root_cause: bool = False
+    root_cause_type: str | None = None  # "originating" | "propagated"
 
     model_config = {"from_attributes": True}
 
@@ -136,6 +161,8 @@ class RunResponse(BaseModel):
     total_tokens: int
     total_latency_ms: float
     metadata: dict
+    has_rewinds: bool = False
+    active_group_id: UUID | None = None
     created_at: datetime
     updated_at: datetime
     span_count: int = 0
@@ -143,23 +170,52 @@ class RunResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class SpanLinkResponse(BaseModel):
+    """Data-flow edge between spans (Section 13.3)."""
+
+    id: UUID
+    run_id: UUID
+    from_span_id: UUID
+    to_span_id: UUID
+    link_type: str = "data"
+
+    model_config = {"from_attributes": True}
+
+
+class RootCauseAttribution(BaseModel):
+    """Root-cause attribution payload (Section 17.2, F-01)."""
+
+    span_id: UUID
+    confidence: float = 0.85
+    path: list[UUID] = Field(default_factory=list)
+    explanation: str
+
+
 class DagResponse(BaseModel):
     """Full DAG for a run — what the frontend consumes.
 
     Spans are a flat list. The frontend reconstructs the tree
-    using parent_span_id references.
+    using parent_span_id references and span_links.
     """
 
     run: RunResponse
     spans: list[SpanResponse]
     root_span_ids: list[UUID]
+    links: list[SpanLinkResponse] = Field(default_factory=list)
+    root_cause: RootCauseAttribution | None = None
 
 
 class RewindResponse(BaseModel):
-    """Result of a rewind operation."""
+    """Result of a rewind operation (Section 16.1)."""
 
     success: bool
+    rewind_group_id: UUID
     rewound_span_id: UUID
-    downstream_re_executed: list[UUID]
+    downstream_re_executed: list[UUID] = Field(default_factory=list)
+    downstream_pending_confirmation: list[UUID] = Field(default_factory=list)
+    downstream_skipped: list[UUID] = Field(default_factory=list)
+    estimated_tokens: int = 0
+    status: str = "completed"
     new_run_id: UUID | None = None
     message: str
+

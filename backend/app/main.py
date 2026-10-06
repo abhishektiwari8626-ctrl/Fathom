@@ -13,7 +13,9 @@ from sqlalchemy import text
 from app.config import get_settings
 from app.database import Base, engine
 from app.routers.evaluations import router as eval_router
+from app.routers.graph import router as graph_router
 from app.routers.ingest import router as ingest_router
+from app.routers.rewind import router as rewind_router
 
 settings = get_settings()
 
@@ -63,6 +65,8 @@ app.add_middleware(
 # Include routers
 app.include_router(ingest_router)
 app.include_router(eval_router)
+app.include_router(graph_router)
+app.include_router(rewind_router)
 
 
 @app.get("/", tags=["Health"])

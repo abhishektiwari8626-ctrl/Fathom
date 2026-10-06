@@ -126,6 +126,16 @@ def validate_tool_span(
 
     http_status = _extract_http_status(meta, output_payload, error_message, status_val)
 
+    # Check for empty results (Section 15.2)
+    has_empty_results = False
+    if not output_payload:
+        has_empty_results = True
+    elif isinstance(output_payload, dict):
+        for key in ("results", "data", "items", "rows"):
+            if key in output_payload and isinstance(output_payload[key], list) and len(output_payload[key]) == 0:
+                has_empty_results = True
+                break
+
     # Determine verdict and score
     is_failed = (
         status_val == SpanStatus.FAILED.value
@@ -135,12 +145,23 @@ def validate_tool_span(
         or not schema_valid
     )
 
+    error_category = None
+    is_retryable = False
+
     if is_failed:
         verdict = EvaluationVerdict.FAILURE
         score = 0.0
-    elif http_status >= 300:
+        if 400 <= http_status < 500:
+            error_category = "caller_error"
+            if http_status == 429:
+                is_retryable = True
+        elif http_status >= 500:
+            error_category = "provider_error"
+            if http_status in (502, 503, 504):
+                is_retryable = True
+    elif http_status >= 300 or has_empty_results:
         verdict = EvaluationVerdict.WARNING
-        score = 0.5
+        score = 0.6
     else:
         verdict = EvaluationVerdict.PASS
         score = 1.0
@@ -151,13 +172,19 @@ def validate_tool_span(
         "schema_valid": schema_valid,
         "http_status": http_status,
         "response_time_ms": round(float(latency_ms), 2),
+        "error_category": error_category,
+        "is_retryable": is_retryable,
+        "has_empty_results": has_empty_results,
     }
 
-    summary = (
-        f"Tool call completed with HTTP {http_status} (response time: {latency_ms:.1f}ms)."
-        if verdict == EvaluationVerdict.PASS
-        else f"Tool call failed with HTTP {http_status}: {error_message or 'Schema validation error or API error'}"
-    )
+    if verdict == EvaluationVerdict.FAILURE:
+        summary = f"Tool call failed with HTTP {http_status} ({error_category or 'execution failure'}): {error_message or 'Schema validation error or API error'}"
+    elif has_empty_results:
+        summary = f"Tool call succeeded with HTTP {http_status} but returned zero results."
+    elif verdict == EvaluationVerdict.WARNING:
+        summary = f"Tool call returned HTTP {http_status} with warnings."
+    else:
+        summary = f"Tool call completed cleanly with HTTP {http_status} ({latency_ms:.1f}ms)."
 
     return EvaluationCreate(
         span_id=span_id,

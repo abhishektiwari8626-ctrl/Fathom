@@ -102,6 +102,10 @@ async def evaluate_span(span: TraceSpan, db: AsyncSession) -> list[Evaluation]:
             score=eval_create.score,
             details=eval_create.details,
             summary=eval_create.summary,
+            evaluator_version=eval_create.evaluator_version,
+            evaluator_model=eval_create.evaluator_model,
+            prompt_hash=eval_create.prompt_hash,
+            error_message=eval_create.error_message,
         )
 
         stmt = stmt.on_conflict_do_update(
@@ -111,6 +115,10 @@ async def evaluate_span(span: TraceSpan, db: AsyncSession) -> list[Evaluation]:
                 "score": stmt.excluded.score,
                 "details": stmt.excluded.details,
                 "summary": stmt.excluded.summary,
+                "evaluator_version": stmt.excluded.evaluator_version,
+                "evaluator_model": stmt.excluded.evaluator_model,
+                "prompt_hash": stmt.excluded.prompt_hash,
+                "error_message": stmt.excluded.error_message,
             },
         )
 
