@@ -150,4 +150,45 @@
    - Status filter pills (`All`, `Failed Only`, `Rewound Only`).
    - Step count, total latency, and token totals displayed on each run card.
 
+### Phase 4: System Verification & Validation
 
+1. **Automated Unit & Integration Test Suite**:
+   - `backend/tests/test_evaluator.py`: 11 tests covering deterministic Phase 1 tool check, Phase 2 semantic drift cosine similarity, Phase 3 judge LLM, and prompt caching.
+   - `backend/tests/test_verdict_precedence.py`: 6 tests verifying strict precedence ordering (`failure > warning > pass`).
+   - `backend/tests/test_graph.py`: 3 integration tests verifying `/runs` list pagination, `/dag` node/edge hierarchy, and `F-01` root cause attribution.
+   - `backend/tests/test_rewind.py`: 3 tests verifying Option B re-execution, write tool pending gate (`R-08`), and run mismatch rejection (`R-02`).
+   - Total tests: **23 passed, 0 failed**.
+
+2. **End-to-End Live Verification**:
+   - Verified against Docker Postgres container `fathom-postgres` seeded with realistic multi-step agent traces.
+   - Live query of `GET /api/v1/runs/829a28c6-c7fc-4f8e-9246-cd34176083a3/dag` identified `score_lead_with_llm` as the origin failure (`is_root_cause: true`, confidence: 0.92) and downstream `assign_to_sales_team` as propagated.
+   - Live execution of `POST /api/v1/runs/829a28c6-c7fc-4f8e-9246-cd34176083a3/rewind` generated a new branch (`rewind_depth: 1`, `rewind_group_id`), cloned the write tool as `status: pending` awaiting confirmation, preserved the original failing span untouched (`R-16`, `I-3`), and re-evaluated the newly created spans.
+   - Production Vite frontend build (`npm run build`) succeeded with 0 TypeScript and bundling errors.
+
+3. **Git Branch and Commit History**:
+   - All commits strictly created on branch: `feat/abhishek/features-update`.
+   - `main` branch was left completely untouched.
+
+---
+
+## How to Run Locally
+
+### 1. Database
+Ensure the `fathom-postgres` container is running:
+```bash
+docker start fathom-postgres
+```
+
+### 2. Backend (FastAPI)
+```bash
+cd backend
+../venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+```
+Swagger API docs available at: `http://localhost:8000/docs`.
+
+### 3. Frontend (React 18 + React Flow + Tailwind)
+```bash
+cd frontend
+npm run dev
+```
+Open `http://localhost:5173` in your browser.
